@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Lee la batería de un Ajazz AJ159 (receptor Compx 248a:5b2f, cable 248a:5b2e).
+
+Imprime JSON en una línea:
+  {"status": "ok|no_reading|not_found|no_permission|error",
+   "mode": "wireless|wired|null", "battery": int|null,
+   "charging": bool,   # cargando de verdad (rx[0x13] == 1)
+   "powered": bool,    # en la base o con cable (rx[0x13] 1 o 2, o modo cable)
+   "error": str|null}
+
+Protocolo (documentado por whiskerd, MIT, github.com/Zamiul-rashid/whiskerd):
+interfaz USB 1, feature report 0x0C de 33 bytes. Se envía 0c 01 20 00 <seq> + ceros
+con HIDIOCSFEATURE y se lee con HIDIOCGFEATURE. Si <seq> repite el de la petición
+anterior, el receptor no responde. Respuesta: rx[2] = 0x20,
+rx[6] = longitud (0 = sin dato), rx[0x12] = batería %, rx[0x13] = 1 cargando (en la
+base o por cable) / 2 llena / 0 descargando.
+
+Uso: aj159-battery [--raw]
+"""
+
+import errno
+import fcntl
+import glob
+import json
+import os
+import random
+import sys
+import time
+
+VID = 0x248A
+PIDS = {0x5B2E: "wired", 0x5B2F: "wireless"}
+VENDOR_IFACE = 1
+REPORT_ID = 0x0C
+REPORT_LEN = 33
+CMD_STATUS = 0x20
+
+
+def _ioc_rw(nr, size):
+    return (3 << 30) | (size << 16) | (ord("H") << 8) | nr
+
+
+HIDIOCSFEATURE = _ioc_rw(0x06, REPORT_LEN)
+HIDIOCGFEATURE = _ioc_rw(0x07, REPORT_LEN)
+
+
+def find_nodes(class_dir="/sys/class/hidraw"):
+    """Nodos /dev/hidrawN de la interfaz vendor. El cable va primero."""
+    found = []
+    for cls in sorted(glob.glob(os.path.join(class_dir, "hidraw*"))):
+        dev = os.path.join(cls, "device")
+        try:
+            with open(os.path.join(dev, "uevent")) as f:
+                hid_id = next(l[7:] for l in f.read().splitlines() if l.startswith("HID_ID="))
+            with open(os.path.join(dev, "..", "bInterfaceNumber")) as f:
+                iface = int(f.read().strip(), 16)
+        except (OSError, StopIteration, ValueError):
+            continue
+        bus, vid, pid = (int(p, 16) for p in hid_id.split(":"))
+        if bus == 3 and vid == VID and pid in PIDS and iface == VENDOR_IFACE:
+            found.append((PIDS[pid], "/dev/" + os.path.basename(cls)))
+    found.sort(key=lambda n: n[0] != "wired")
+    return found
+
+
+def query(node):
+    """Devuelve la respuesta cruda (33 bytes) del comando de estado.
+
+    El receptor ignora una petición con el mismo número de secuencia que la anterior,
+    así que cada intento usa uno aleatorio.
+    """
+    fd = os.open(node, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        rx = bytearray(REPORT_LEN)
+        for seq in random.sample(range(1, 256), 2):
+            req = bytearray(REPORT_LEN)
+            req[:5] = bytes([REPORT_ID, 0x01, CMD_STATUS, 0x00, seq])
+            fcntl.ioctl(fd, HIDIOCSFEATURE, req)
+            for _ in range(5):
+                time.sleep(0.06)
+                rx = bytearray(REPORT_LEN)
+                rx[0] = REPORT_ID
+                fcntl.ioctl(fd, HIDIOCGFEATURE, rx)
+                if parse(rx) is not None:
+                    return bytes(rx)
+        return bytes(rx)
+    finally:
+        os.close(fd)
+
+
+def parse(rx):
+    """(batería, estado de carga rx[0x13]) o None si la respuesta no trae dato válido."""
+    if len(rx) < 0x14 or rx[0] != REPORT_ID or rx[2] != CMD_STATUS or rx[6] == 0:
+        return None
+    battery = rx[0x12]
+    # El receptor responde 0 antes de que el mouse haya reportado: no es un 0 real.
+    if battery == 0 or battery > 100:
+        return None
+    return battery, rx[0x13]
+
+
+def main(argv):
+    raw = "--raw" in argv
+    result = {"status": "not_found", "mode": None, "battery": None, "charging": False,
+              "powered": False, "error": None}
+    for mode, node in find_nodes():
+        result["mode"] = mode
+        try:
+            rx = query(node)
+        except PermissionError:
+            result["status"] = "no_permission"
+            continue
+        except OSError as e:
+            if e.errno in (errno.ENODEV, errno.ENOENT):
+                continue
+            result.update(status="error", error=str(e))
+            continue
+        if raw:
+            print(node, mode, rx.hex(" "), file=sys.stderr)
+        parsed = parse(rx)
+        if parsed is None:
+            # Por cable seguro que está conectado a la corriente, aunque no haya dato.
+            result.update(status="no_reading", charging=False, powered=(mode == "wired"))
+            continue
+        battery, state = parsed
+        result.update(status="ok", battery=battery, charging=state == 1,
+                      powered=state in (1, 2) or mode == "wired", error=None)
+        break
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,18 @@
+{
+    "KPlugin": {
+        "Id": "aj159-battery",
+        "Name": "Batería AJ159",
+        "Description": "Muestra la batería del mouse Ajazz AJ159 en el panel",
+        "Icon": "input-mouse",
+        "Version": "1.0",
+        "License": "MIT",
+        "Category": "System Information",
+        "Authors": [
+            {
+                "Name": "Rafael"
+            }
+        ]
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

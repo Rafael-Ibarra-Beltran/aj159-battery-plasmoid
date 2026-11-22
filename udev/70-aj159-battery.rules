@@ -1,0 +1,4 @@
+# Da acceso al usuario con sesión activa a los nodos hidraw del Ajazz AJ159
+# (receptor 248a:5b2f y cable 248a:5b2e). Solo se usa para leer la batería.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="248a", ATTRS{idProduct}=="5b2f", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="248a", ATTRS{idProduct}=="5b2e", TAG+="uaccess"
